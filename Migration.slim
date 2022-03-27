@@ -1,0 +1,352 @@
+initialize()
+{
+	initializeSLiMModelType("nonWF");
+	initializeSLiMOptions(dimensionality="xy");
+	
+	/**Model parameters*/
+	defineConstant("K", 1000); // carrying capacity
+	defineConstant("N0", 300); // starting population size
+	defineConstant("S", 0.1); // spatial competition distance; normal distribution with sigma = S
+	defineConstant("N_migrants", 20); // number of migrants per generation
+	defineConstant("dist_o", 0.15); // max mating distance of the original individuals
+	defineConstant("dist_m", 0.15); // max mating distance of migrants
+	defineConstant("offspring_o", 2); // mean offspring number per original individual in the lifetime
+	defineConstant("offspring_m", 2); // mean offspring number per migrant individual in the lifetime
+	defineConstant("dispersal_o", 0.02); // mean offspring dispersal of the original indvividuals
+	defineConstant("dispersal_m", 0.02); // mean offspring dispersal of migrants
+	defineConstant("preference", 0); // preference for people of similar ancestry; from 0 to 1
+	defineConstant("move_o", 0.03); // mean movement at the end of generation of original individuals
+	defineConstant("move_m", 0.03); // mean movement at the end of generation of migrants
+	defineConstant("fit_o", 1); // fitness scaling factor for original individuals
+	defineConstant("fit_m", 1); // fitness scaling factor for migrants
+	
+	//not needed for the model but necessary for the script to run
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.convertToSubstitution = T;
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1, 0, 1);
+	initializeMutationRate(0);
+	initializeRecombinationRate(0);
+	
+	// spatial competition
+	initializeInteractionType(1, "xy", reciprocal=T, maxDistance=S);
+	i1.setInteractionFunction("n", 1.0, S*3);
+	
+	// spatial mate choice
+	initializeInteractionType(2, "xy", reciprocal=T, maxDistance=2);
+	
+	// for R live plotting
+	if (fileExists("/usr/bin/Rscript"))
+		defineConstant("RSCRIPT", "/usr/bin/Rscript");
+	else if (fileExists("/usr/local/bin/Rscript"))
+		defineConstant("RSCRIPT", "/usr/local/bin/Rscript");
+	else
+		stop("Couldn't find Rscript.");
+	defineConstant("sampling", 1); // frequency of data update (in generations)
+	defineConstant("plot_update", 100); // frequency of plot update (in generations); cannot be lower than sampling rate
+	
+	// to see the parameters in the output log:
+	catn();
+	catn("K:" + K + " N0:" + N0 + " S:" + S + " N_migrants:" + N_migrants + " dist_o:" + dist_o + " dist_m:" + dist_m + " offspring_o:" + offspring_o + " offspring_m:" + offspring_m + " dispersal_o:" + dispersal_o + " dispersal_m:" + dispersal_m + " preference:" + preference + " move_o:" + move_o + " move_m:" + move_m + " fit_o:" + fit_o + " fit_m:" + fit_m);
+}
+
+first()
+{
+	// look for mates
+	i2.evaluate();
+}
+
+1:10 reproduction() // wait before introducing migration
+{
+	mating(dist_o, dist_m, offspring_o, offspring_m, dispersal_o, dispersal_m, preference, individual);
+}
+
+11: reproduction()
+{
+	add_migrants(N_migrants);
+	mating(dist_o, dist_m, offspring_o, offspring_m, dispersal_o, dispersal_m, preference, individual);
+
+}
+
+1 early()
+{
+	sim.addSubpop("p1", N0);
+	p1.individuals.tagF = 0.0;
+	p1.individuals.color = "green";
+	
+	// random initial positions
+	p1.individuals.setSpatialPosition(p1.pointUniform(N0));
+	
+	// for R live plotting
+	sim.setValue("band1_avg", NULL);
+	sim.setValue("band2_avg", NULL);
+	sim.setValue("band3_avg", NULL);
+	sim.setValue("band4_avg", NULL);
+	sim.setValue("band5_avg", NULL);
+	sim.setValue("avg_ancestry", NULL);
+	sim.setValue("any_ancestry", NULL);
+	
+	// to output some data only once
+	sim.setValue("avg_output", 0);
+	sim.setValue("any_output", 0);
+	sim.setValue("band1_output", 0);
+	sim.setValue("band2_output", 0);
+	sim.setValue("band3_output", 0);
+	sim.setValue("band4_output", 0);
+	sim.setValue("band5_output", 0);
+	
+	// random filename endings
+	defineConstant("pngPathBands", writeTempFile("plot_bands_", ".png", ""));
+	defineConstant("pngPathAncestry", writeTempFile("plot_overall_ancestry_", ".png", ""));
+	
+	// open plots if gui is used
+	if (exists("slimgui"))
+	{
+		slimgui.openDocument(pngPathBands);
+		slimgui.openDocument(pngPathAncestry);
+	}
+}
+
+early()
+{
+	i1.evaluate();
+	
+	// spatial competition for density-dependent selection
+	inds = p1.individuals;
+	competition = i1.totalOfNeighborStrengths(inds);
+	competition = (competition + 1) / (PI * S^2); // gaussian kernel rescaling
+	inds.fitnessScaling = K / competition;
+	
+	// ancestry-dependent fitness rescaling
+	fit = inds.tagF * fit_m + (1 - inds.tagF) * fit_o;
+	inds.fitnessScaling = inds.fitnessScaling * fit;
+	
+	// remove old individuals
+	inds[inds.age > 3].fitnessScaling = 0;
+}
+
+late()
+{
+	// move around a bit
+	for (ind in p1.individuals)
+	{
+		move = ind.tagF * move_m + (1 - ind.tagF) * move_o;
+		newPos = ind.spatialPosition + rnorm(2, 0, move);
+		ind.setSpatialPosition(p1.pointReflected(newPos));
+	}
+	if (sim.generation % sampling == 0)
+	{
+		update_plot_data();
+	}
+	if (sim.generation % plot_update == 0)
+	{
+		if (exists("slimgui"))
+		{
+			update_plots();
+		}
+	}
+}
+
+s1 500 late()
+{
+	sim.outputFixedMutations();
+	catn(sim.getValue("band1_output"));
+	catn(sim.getValue("band2_output"));
+	catn(sim.getValue("band3_output"));
+	catn(sim.getValue("band4_output"));
+	catn(sim.getValue("band5_output"));
+	catn(sim.getValue("any_output"));
+	catn(sim.getValue("avg_output"));
+	catn();
+	catn();
+}
+
+
+
+
+//
+///
+/** Functions: */
+function (void)mating(numeric max_mating_distance_original, numeric max_mating_distance_migrant, numeric offspring_per_ind_original, numeric offspring_per_ind_migrant, numeric offspring_dispersal_original, numeric offspring_dispersal_migrant, numeric preference_strength,  o<Individual> ind)
+{
+	if (ind.age > 2)
+		return; // only young enough can mate
+	tag = ind.tagF;
+	max_mating_distance = tag * max_mating_distance_migrant + (1 - tag) * max_mating_distance_original;
+	offspring_per_ind = (tag * offspring_per_ind_migrant + (1 - tag) * offspring_per_ind_original) / 2; // halve because two mating generations
+	mates = p1.individuals[i2.distanceToPoint(p1.individuals, ind.spatialPosition) <= max_mating_distance];
+	mates = mates[mates != ind]; // no selfing allowed
+	old_mates = mates[mates.age == ind.age]; // preference for individuals from the same generation
+	
+	for (i in seqLen(rpois(1, offspring_per_ind)))
+	{
+		if (old_mates.size())
+		{
+			weights = 1 - abs(old_mates.tagF - ind.tagF)*preference_strength; // preference for people that are similar ancestry-wise 
+			if (sum(weights) != 0) // can happen with preference 1
+			{
+				mate = sample(old_mates, 1, weights = weights);
+				offspring = p1.addCrossed(ind, mate);
+				if (mate.tagF == 0 & ind.tagF == 0)
+				{
+					offspring.tagF = 0.0;
+					offspring.color = "green";
+				}
+				else
+				{
+					offspring.tagF = (ind.tagF + mate.tagF) / 2;
+					shade = 45 + asInteger(floor(offspring.tagF * 50)); // greyness depending on ancestry percentage
+					offspring.color = ("grey" + asString(shade));
+				}
+				
+				tag_o = offspring.tagF;
+				offspring_dispersal = tag_o * offspring_dispersal_migrant + (1 - tag_o) * offspring_dispersal_original;
+				pos = ind.spatialPosition + rnorm(2, 0, offspring_dispersal); // dispersal from first parent
+				offspring.setSpatialPosition(p1.pointReflected(pos));
+			}
+		}
+	}
+
+}
+
+function (void)add_migrants(i migrants_number)
+{
+	if (individual.index < migrants_number) // number of migrants per generation
+	{
+		offspring = p1.addEmpty();
+		offspring.tagF = 1.0;
+		offspring.setSpatialPosition(p1.pointUniform(1));
+		offspring.y = offspring.y / 10; // generate migrants in the lowest 10% of the map
+		offspring.color = "deeppink2";
+	}
+}
+
+function (float)tagF_avg(void)
+{
+	return sum(p1.individuals.tagF) / p1.individuals.size();
+}
+
+function (float)any_ancestry(void)
+{
+	return (1 - (p1.individuals[p1.individuals.tagF == 0.0].size()) / p1.individuals.size());
+}
+
+function (void)update_plot_data(void)
+{
+	i2.evaluate();
+	
+	// bands
+	band1s = p1.individuals[p1.individuals.y <= 0.2];
+	band2s = p1.individuals[p1.individuals.y > 0.2 & p1.individuals.y <= 0.4];
+	band3s = p1.individuals[p1.individuals.y > 0.4 & p1.individuals.y <= 0.6];
+	band4s = p1.individuals[p1.individuals.y > 0.6 & p1.individuals.y <= 0.8];
+	band5s = p1.individuals[p1.individuals.y > 0.8];
+	band1 = sum(band1s.tagF) / band1s.size();
+	band2 = sum(band2s.tagF) / band2s.size();
+	band3 = sum(band3s.tagF) / band3s.size();
+	band4 = sum(band4s.tagF) / band4s.size();
+	band5 = sum(band5s.tagF) / band5s.size();
+	sim.setValue("band1_avg", c(sim.getValue("band1_avg"), band1));
+	sim.setValue("band2_avg", c(sim.getValue("band2_avg"), band2));
+	sim.setValue("band3_avg", c(sim.getValue("band3_avg"), band3));
+	sim.setValue("band4_avg", c(sim.getValue("band4_avg"), band4));
+	sim.setValue("band5_avg", c(sim.getValue("band5_avg"), band5));
+	
+	//overall ancestry
+	avg = tagF_avg();
+	any = any_ancestry();
+	sim.setValue("avg_ancestry", c(sim.getValue("avg_ancestry"), avg));
+	sim.setValue("any_ancestry", c(sim.getValue("any_ancestry"), any));
+	
+	// output upon reaching 0.5
+	if (avg >= 0.5 & sim.getValue("avg_output") == 0)
+	{
+		catn("Average: " + sim.generation);
+		sim.setValue("avg_output", sim.generation);
+	}
+	if (any >= 0.5 & sim.getValue("any_output") == 0)
+	{
+		catn("Any: " + sim.generation);
+		sim.setValue("any_output", sim.generation);
+	}
+	if (band1 >= 0.5 & sim.getValue("band1_output") == 0)
+	{
+		catn("Band 1: " + sim.generation);
+		sim.setValue("band1_output", sim.generation);
+	}
+	if (band2 >= 0.5 & sim.getValue("band2_output") == 0)
+	{
+		catn("Band 2: " + sim.generation);
+		sim.setValue("band2_output", sim.generation);
+	}
+	if (band3 >= 0.5 & sim.getValue("band3_output") == 0)
+	{
+		catn("Band 3: " + sim.generation);
+		sim.setValue("band3_output", sim.generation);
+		// uncomment if you want to end simulations after Band 3 is reached, to save computational time
+		// sim.rescheduleScriptBlock(s1, start=sim.generation+1, end=sim.generation+1);
+	}
+	if (band4 >= 0.5 & sim.getValue("band4_output") == 0)
+	{
+		catn("Band 4: " + sim.generation);
+		sim.setValue("band4_output", sim.generation);
+	}
+	if (band5 >= 0.5 & sim.getValue("band5_output") == 0)
+	{
+		catn("Band 5: " + sim.generation);
+		sim.setValue("band5_output", sim.generation);
+	}
+}
+
+function (void)update_plots(void)
+{
+	// ancestries
+	avg_ancestry = sim.getValue("avg_ancestry");
+	any_ancestry = sim.getValue("any_ancestry");
+	rstr = paste('{',
+		'x <- (1:' + size(avg_ancestry) + ') *' + sampling,
+		'y1 <- c(' + paste(avg_ancestry, sep=", ") + ')',
+		'y2 <- c(' + paste(any_ancestry, sep=", ") + ')',
+		'png(width=4, height=4, units="in", res=72, file="' + pngPathAncestry + '")',
+		'par(mar=c(4.0, 4.0, 1.5, 1.5))',
+		'plot(x=x, y=y1, xlim=c(0, 500), ylim=c(0, 1), type="l", xlab="Generation", ylab="Ancestry %", cex.axis=0.95, cex.lab=1.2, mgp=c(2.5, 0.7, 0), col="red", lwd=2, xaxp=c(0, 500, 5))',
+		'lines(x, y2, type="l", col="blue", lwd=2)',
+		'legend("bottomright", legend=c("Average", "Any"), col=c("red", "blue"), cex=0.8, lwd=2, lty=1)',
+		'abline(h=0.5, col="black")',
+		'box()',
+		'dev.off()',
+		'}',
+		sep="\n");
+	scriptPath = writeTempFile("plot_ancestry_", ".R", rstr);
+	system(RSCRIPT, args=scriptPath);
+	deleteFile(scriptPath);
+	
+	// bands
+	band1 = sim.getValue("band1_avg");
+	band2 = sim.getValue("band2_avg");
+	band3 = sim.getValue("band3_avg");
+	band4 = sim.getValue("band4_avg");
+	band5 = sim.getValue("band5_avg");
+	rstr = paste('{', 'x <- (1:' + size(band1) + ') *' + sampling,
+		'	y1 <- c(' + paste(band1, sep=", ") + ')',
+		'y2 <- c(' + paste(band2, sep=", ") + ')',
+		'y3 <- c(' + paste(band3, sep=", ") + ')',
+		'y4 <- c(' + paste(band4, sep=", ") + ')',
+		'y5 <- c(' + paste(band5, sep=", ") + ')',
+		'png(width=4, height=4, units="in", res=72, file="' + pngPathBands + '")',
+		'par(mar=c(4.0, 4.0, 1.5, 1.5))',
+		'plot(x=x, y=y1, xlim=c(0, 500), ylim=c(0, 1), type="l", xlab="Generation", ylab="Ancestry %", cex.axis=0.95, cex.lab=1.2, mgp=c(2.5, 0.7, 0), col="red", lwd=2, xaxp=c(0, 500, 5))',
+		'lines(x, y2, type="l", col="orange", lwd=2)',
+		'lines(x, y3, type="l", col="green", lwd=2)',
+		'lines(x, y4, type="l", col="blue", lwd=2)',
+		'lines(x, y5, type="l", col="purple", lwd=2)',
+		'abline(h=0.5, col="black")',
+		'legend("bottomright", legend=c("Band 1", "Band 2", "Band 3", "Band 4", "Band 5"), col=c("red", "orange", "green", "blue", "purple"), cex=0.8, lwd=2, lty=1)',
+		'box()',
+		'dev.off()',
+		'}',
+		sep="\n");
+	scriptPath = writeTempFile("plot_bands_", ".R", rstr);
+	system(RSCRIPT, args=scriptPath);
+	deleteFile(scriptPath);
+}
